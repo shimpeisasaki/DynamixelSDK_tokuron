@@ -13,24 +13,25 @@ endif()
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(rclcpp REQUIRED)
 find_package(dynamixel_sdk REQUIRED)
 find_package(dynamixel_sdk_custom_interfaces REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(rclpy REQUIRED)
+find_package(std_msgs REQUIRED)
 
 include_directories(include)
 
 # Build
-add_executable(read_write_node src/read_write_node.cpp)
-target_link_libraries(read_write_node PUBLIC
-  dynamixel_sdk::dynamixel_sdk
-  ${dynamixel_sdk_custom_interfaces_TARGETS}
-  rclcpp::rclcpp
+add_executable(realsense_pitch src/realsense_pitch.cpp)
+ament_target_dependencies(realsense_pitch
+  dynamixel_sdk
+  dynamixel_sdk_custom_interfaces
+  rclcpp
+  std_msgs
 )
 
 # Install
 install(TARGETS
-  read_write_node
+  realsense_pitch
   DESTINATION lib/${PROJECT_NAME}
 )
 
