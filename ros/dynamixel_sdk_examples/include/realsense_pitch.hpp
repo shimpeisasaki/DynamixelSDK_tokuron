@@ -24,7 +24,6 @@
 #include "rcutils/cmdline_parser.h"
 #include "dynamixel_sdk/dynamixel_sdk.h"
 #include "std_msgs/msg/float64.hpp"
-#include "std_msgs/msg/float64.hpp"
 
 
 class ReadWriteNode : public rclcpp::Node
@@ -39,6 +38,9 @@ private:
   rclcpp::TimerBase::SharedPtr present_angle_timer_;
 
   uint8_t target_id_;
+  int32_t min_goal_position_;
+  int32_t max_goal_position_;
+  double present_angle_publish_hz_;
   bool has_recent_goal_;
   int32_t present_position_;
 };

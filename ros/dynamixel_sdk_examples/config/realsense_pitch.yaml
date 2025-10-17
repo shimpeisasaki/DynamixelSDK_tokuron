@@ -1,0 +1,7 @@
+dynamixel_sdk_examples:
+  realsense_pitch_node:
+    ros__parameters:
+      min_goal_position: 205 # about 60 degrees
+      max_goal_position: 546 # about 160 degrees
+      fixed_dxl_id: 5
+      present_angle_publish_hz: 20.0

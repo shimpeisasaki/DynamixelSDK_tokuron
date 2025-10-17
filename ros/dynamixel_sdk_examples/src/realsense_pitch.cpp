@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -36,7 +37,7 @@
 #define PROTOCOL_VERSION 1.0     // AX-12A uses Protocol 1.0
 
 // Default settings for motor communication.
-#define BAUDRATE 1000000         // Common initial baudrate for AX-12A (change if necessary)
+#define BAUDRATE 1000000    // Common initial baudrate for AX-12A (change if necessary)
 #define DEVICE_NAME "/dev/ttyUSB0"  // [Linux]: "/dev/ttyUSB*", [Windows]: "COM*"
 
 dynamixel::PortHandler * portHandler;
@@ -45,50 +46,86 @@ dynamixel::PacketHandler * packetHandler;
 uint8_t dxl_error = 0;
 int dxl_comm_result = COMM_TX_FAIL;
 
-constexpr int32_t MIN_GOAL_POSITION = 200;
-constexpr int32_t MAX_GOAL_POSITION = 550;
-constexpr uint8_t FIXED_DXL_ID = 5;
+namespace
+{
+constexpr int32_t kDefaultMinGoalPosition = 205;
+constexpr int32_t kDefaultMaxGoalPosition = 546;
+constexpr int32_t kDefaultFixedDxlId = 5;
+}
+
+void setupDynamixel(uint8_t dxl_id);
 
 using namespace std::chrono_literals;
 
 ReadWriteNode::ReadWriteNode()
 : Node("realsense_pitch_node"),
-  target_id_(FIXED_DXL_ID),
+  target_id_(static_cast<uint8_t>(kDefaultFixedDxlId)),
+  min_goal_position_(kDefaultMinGoalPosition),
+  max_goal_position_(kDefaultMaxGoalPosition),
+  present_angle_publish_hz_(30.0),
   has_recent_goal_(false),
   present_position_(0)
 {
   RCLCPP_INFO(this->get_logger(), "Run read write node");
 
-  this->declare_parameter("qos_depth", 10);
+  this->declare_parameter("qos_depth", 5);
   int8_t qos_depth = 0;
   this->get_parameter("qos_depth", qos_depth);
 
-  this->declare_parameter<int>("dynamixel_id", 1);
+  this->declare_parameter<int64_t>("min_goal_position", kDefaultMinGoalPosition);
+  this->declare_parameter<int64_t>("max_goal_position", kDefaultMaxGoalPosition);
+  this->declare_parameter<int64_t>("fixed_dxl_id", kDefaultFixedDxlId);
+  present_angle_publish_hz_ = this->declare_parameter<double>("present_angle_publish_hz", 30.0);
 
-  const auto QOS_RKL10V =
+  min_goal_position_ = static_cast<int32_t>(this->get_parameter("min_goal_position").as_int());
+  max_goal_position_ = static_cast<int32_t>(this->get_parameter("max_goal_position").as_int());
+  if (min_goal_position_ >= max_goal_position_) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "min_goal_position (%d) is not less than max_goal_position (%d). Using defaults.",
+      min_goal_position_,
+      max_goal_position_);
+    min_goal_position_ = kDefaultMinGoalPosition;
+    max_goal_position_ = kDefaultMaxGoalPosition;
+  }
+
+  const auto requested_id = this->get_parameter("fixed_dxl_id").as_int();
+  const int clamped_id = std::clamp<int>(static_cast<int>(requested_id), 0, 253);
+  if (static_cast<int64_t>(clamped_id) != requested_id) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "fixed_dxl_id (%ld) is out of range [0, 253]. Clamping to %d.",
+      requested_id,
+      clamped_id);
+  }
+  target_id_ = static_cast<uint8_t>(clamped_id);
+
+  if (present_angle_publish_hz_ <= 0.0) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "present_angle_publish_hz (%f) must be greater than 0. Using default %.1f.",
+      present_angle_publish_hz_,
+      30.0);
+    present_angle_publish_hz_ = 30.0;
+  }
+
+  const auto qos_profile =
     rclcpp::QoS(rclcpp::KeepLast(qos_depth)).reliable().durability_volatile();
 
-  set_position_subscriber_ =
-    this->create_subscription<std_msgs::msg::Float64>(
+  set_position_subscriber_ = this->create_subscription<std_msgs::msg::Float64>(
     "set_position",
-    QOS_RKL10V,
+    qos_profile,
     [this](const std_msgs::msg::Float64::SharedPtr msg) -> void
     {
       uint8_t dxl_error = 0;
 
       const double requested_angle_deg = msg->data;
-      // Add fixed offset (200) to map user angle to internal goal position
-      // Goal = OFFSET + requested_angle_deg * 1023 / 300
-      const double raw_goal = static_cast<double>(MIN_GOAL_POSITION) + requested_angle_deg * 1023.0 / 300.0;
-      int32_t clamped_goal_position = static_cast<int32_t>(std::lround(raw_goal));
-      if (clamped_goal_position < MIN_GOAL_POSITION) {
-        clamped_goal_position = MIN_GOAL_POSITION;
-      } else if (clamped_goal_position > MAX_GOAL_POSITION) {
-        clamped_goal_position = MAX_GOAL_POSITION;
-      }
+  const double raw_goal = static_cast<double>(min_goal_position_) + requested_angle_deg * 1023.0 / 300.0;
+  int32_t goal_position_ticks = static_cast<int32_t>(std::lround(raw_goal));
+  goal_position_ticks = std::clamp(goal_position_ticks, min_goal_position_, max_goal_position_);
 
       // The position value for AX-12A is represented as 2-byte data (uint16_t).
-      uint16_t goal_position_uint16 = static_cast<uint16_t>(clamped_goal_position);
+      uint16_t goal_position_uint16 = static_cast<uint16_t>(goal_position_ticks);
 
       // Write the Goal Position (2 bytes in length) to the motor.
       // Use write2ByteTxRx for AX-12A
@@ -108,19 +145,22 @@ ReadWriteNode::ReadWriteNode()
         has_recent_goal_ = true;
         RCLCPP_INFO(
           this->get_logger(),
-          "Set [ID: %u] [Goal Position: %d] (requested angle: %.2f deg)",
+          "Set [ID: %u] [Goal Position: %d] (requested angle: %.1f deg)",
           static_cast<unsigned int>(target_id_),
-          clamped_goal_position,
+          goal_position_ticks,
           requested_angle_deg
         );
       }
     }
-    );
+  );
 
-  present_angle_publisher_ = this->create_publisher<std_msgs::msg::Float64>("present_angle", QOS_RKL10V);
+  present_angle_publisher_ = this->create_publisher<std_msgs::msg::Float64>("present_angle", qos_profile);
+
+  const auto publish_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::duration<double>(1.0 / present_angle_publish_hz_));
 
   present_angle_timer_ = this->create_wall_timer(
-    50ms,
+    publish_period,
     [this]() {
       if (!has_recent_goal_) {
         return;
@@ -151,28 +191,34 @@ ReadWriteNode::ReadWriteNode()
       std_msgs::msg::Float64 angle_msg;
       // Convert the internal position to degrees using the same offset and scale as in set_position.
       // degree = (present_position - OFFSET) * 300 / 1023
-      double angle = (static_cast<double>(present_position_) - static_cast<double>(MIN_GOAL_POSITION)) * 300.0 / 1023.0;
-      // Ensure the angle is clamped within the range [0, 300].
-      if (angle < 0.0) {
+      double angle = static_cast<double>(present_position_ - min_goal_position_) * 300.0 / 1023.0;
+      if (angle >= -0.4) { // To avoid small positive angles due to noise
         angle = 0.0;
-      } else if (angle > 300.0) {
-        angle = 300.0;
       }
       angle_msg.data = angle;
       present_angle_publisher_->publish(angle_msg);
-    });
+    }
+  );
 
-  (void)0; // removed get_position service
+  setupDynamixel(target_id_);
 }
 
 ReadWriteNode::~ReadWriteNode()
 {
+  if (packetHandler != nullptr && portHandler != nullptr) {
+    packetHandler->write1ByteTxRx(
+      portHandler,
+      target_id_,
+      ADDR_TORQUE_ENABLE,
+      0,
+      &dxl_error
+    );
+  }
 }
 
 void setupDynamixel(uint8_t dxl_id)
 {
   // No need to set the Operating Mode for AX-12A (it is always in joint/wheel mode).
-
   // Enable the torque of the DYNAMIXEL motor.
   dxl_comm_result = packetHandler->write1ByteTxRx(
     portHandler,
@@ -212,25 +258,11 @@ int main(int argc, char * argv[])
     RCLCPP_INFO(rclcpp::get_logger("realsense_pitch_node"), "Succeeded to set the baudrate.");
   }
 
-// Enable torque on startup (use BROADCAST_ID=254 for all motors).
-// It may be necessary to specify a specific ID like ID=1 instead of BROADCAST_ID depending on the environment.
-
-  setupDynamixel(FIXED_DXL_ID); 
-
   rclcpp::init(argc, argv);
 
   auto readwritenode = std::make_shared<ReadWriteNode>();
   rclcpp::spin(readwritenode);
   rclcpp::shutdown();
-
-  // Disable Torque of DYNAMIXEL on shutdown
-  packetHandler->write1ByteTxRx(
-    portHandler,
-    FIXED_DXL_ID,
-    ADDR_TORQUE_ENABLE,
-    0,
-    &dxl_error
-  );
 
   return 0;
 }

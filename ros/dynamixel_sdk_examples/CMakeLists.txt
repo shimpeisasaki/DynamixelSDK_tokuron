@@ -15,6 +15,10 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
+install(DIRECTORY
+  config
+  DESTINATION share/${PROJECT_NAME}
+)
 find_package(rcutils REQUIRED)
 find_package(dynamixel_sdk REQUIRED)
 find_package(dynamixel_sdk_custom_interfaces REQUIRED)
