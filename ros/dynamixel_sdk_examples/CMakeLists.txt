@@ -23,6 +23,9 @@ find_package(rcutils REQUIRED)
 find_package(dynamixel_sdk REQUIRED)
 find_package(dynamixel_sdk_custom_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 include_directories(include)
 add_executable(realsense_pitch src/realsense_pitch.cpp)
 target_include_directories(realsense_pitch PRIVATE include)
@@ -31,6 +34,9 @@ ament_target_dependencies(realsense_pitch
   dynamixel_sdk_custom_interfaces
   rclcpp
   std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
 )
 
 add_executable(read_write_node src/read_write_node.cpp)

@@ -24,6 +24,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rcutils/cmdline_parser.h"
 #include "std_msgs/msg/float64.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "tf2/LinearMath/Quaternion.h"
 
 #include "realsense_pitch.hpp"
 
@@ -51,6 +53,7 @@ namespace
 constexpr int32_t kDefaultMinGoalPosition = 205;
 constexpr int32_t kDefaultMaxGoalPosition = 546;
 constexpr int32_t kDefaultFixedDxlId = 5;
+constexpr double kDegToRad = M_PI / 180.0;
 }
 
 void setupDynamixel(uint8_t dxl_id);
@@ -75,7 +78,14 @@ ReadWriteNode::ReadWriteNode()
   this->declare_parameter<int64_t>("min_goal_position", kDefaultMinGoalPosition);
   this->declare_parameter<int64_t>("max_goal_position", kDefaultMaxGoalPosition);
   this->declare_parameter<int64_t>("fixed_dxl_id", kDefaultFixedDxlId);
+  parent_frame_ = this->declare_parameter<std::string>("parent_frame", "base_link");
+  child_frame_ = this->declare_parameter<std::string>("child_frame", "camera_pitch");
+  frame_offset_x_ = this->declare_parameter<double>("frame_offset_x", 0.042);
+  frame_offset_y_ = this->declare_parameter<double>("frame_offset_y", 0.0);
+  frame_offset_z_ = this->declare_parameter<double>("frame_offset_z", 0.260);
   present_angle_publish_hz_ = this->declare_parameter<double>("present_angle_publish_hz", 30.0);
+
+  tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
   min_goal_position_ = static_cast<int32_t>(this->get_parameter("min_goal_position").as_int());
   max_goal_position_ = static_cast<int32_t>(this->get_parameter("max_goal_position").as_int());
@@ -119,10 +129,10 @@ ReadWriteNode::ReadWriteNode()
     {
       uint8_t dxl_error = 0;
 
-      const double requested_angle_deg = msg->data;
-  const double raw_goal = static_cast<double>(min_goal_position_) + requested_angle_deg * 1023.0 / 300.0;
-  int32_t goal_position_ticks = static_cast<int32_t>(std::lround(raw_goal));
-  goal_position_ticks = std::clamp(goal_position_ticks, min_goal_position_, max_goal_position_);
+    const double requested_angle_deg = msg->data;
+    const double raw_goal = static_cast<double>(min_goal_position_) + requested_angle_deg * 1023.0 / 300.0;
+    int32_t goal_position_ticks = static_cast<int32_t>(std::lround(raw_goal));
+    goal_position_ticks = std::clamp(goal_position_ticks, min_goal_position_, max_goal_position_);
 
       // The position value for AX-12A is represented as 2-byte data (uint16_t).
       uint16_t goal_position_uint16 = static_cast<uint16_t>(goal_position_ticks);
@@ -162,10 +172,6 @@ ReadWriteNode::ReadWriteNode()
   present_angle_timer_ = this->create_wall_timer(
     publish_period,
     [this]() {
-      if (!has_recent_goal_) {
-        return;
-      }
-
       uint16_t read_data_uint16 = 0;
       uint8_t local_error = 0;
       int local_comm_result = packetHandler->read2ByteTxRx(
@@ -192,11 +198,30 @@ ReadWriteNode::ReadWriteNode()
       // Convert the internal position to degrees using the same offset and scale as in set_position.
       // degree = (present_position - OFFSET) * 300 / 1023
       double angle = static_cast<double>(present_position_ - min_goal_position_) * 300.0 / 1023.0;
-      if (angle >= -0.4) { // To avoid small positive angles due to noise
+      if (std::abs(angle) <= 0.5) {
         angle = 0.0;
       }
       angle_msg.data = angle;
       present_angle_publisher_->publish(angle_msg);
+
+      if (tf_broadcaster_ != nullptr) {
+        geometry_msgs::msg::TransformStamped tf_msg;
+        tf_msg.header.stamp = this->now();
+        tf_msg.header.frame_id = parent_frame_;
+        tf_msg.child_frame_id = child_frame_;
+  tf_msg.transform.translation.x = frame_offset_x_;
+  tf_msg.transform.translation.y = frame_offset_y_;
+  tf_msg.transform.translation.z = frame_offset_z_;
+
+        tf2::Quaternion q;
+        q.setRPY(0.0, -angle * kDegToRad, 0.0);
+        tf_msg.transform.rotation.x = q.x();
+        tf_msg.transform.rotation.y = q.y();
+        tf_msg.transform.rotation.z = q.z();
+        tf_msg.transform.rotation.w = q.w();
+
+        tf_broadcaster_->sendTransform(tf_msg);
+      }
     }
   );
 
